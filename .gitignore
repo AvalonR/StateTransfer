@@ -28,6 +28,9 @@ ThoughtDrawing.png
 # env file
 .env
 
+# Session state
+SESSION.md
+
 # Editor/IDE
 .idea/
 .vscode/
