@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/mdns"
+	"golang.org/x/crypto/nacl/box"
 )
 
 func main() {
@@ -47,7 +49,7 @@ func main() {
 				fmt.Println(err)
 				return
 			}
-			go handleConnection(conn)
+			go acceptKeyExchange(conn)
 		}
 	}()
 
@@ -75,19 +77,7 @@ func main() {
 			if entry.Name == instanceName+"._statetransfer._tcp.local." {
 				continue
 			}
-			go func(addr string) {
-				conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-				defer conn.Close()
-				if err := WriteFrame(conn, nil, Ping, 0); err != nil {
-					fmt.Println("Error writing ping:", err)
-					return
-				}
-				handleConnection(conn)
-			}(fmt.Sprintf("%s:%d", entry.AddrV4, entry.Port))
+			go dialKeyExchange(fmt.Sprintf("%s:%d", entry.AddrV4, entry.Port))
 		}
 	}()
 
@@ -98,7 +88,7 @@ func main() {
 		}
 	}()
 	if *peerAddr != "" {
-		go dialPeer(*peerAddr)
+		go dialKeyExchange(*peerAddr)
 	}
 
 	waitForSignal()
@@ -137,19 +127,80 @@ func waitForSignal() {
 	<-sig
 }
 
-func dialPeer(addr string) {
-	fmt.Printf("Dialing peer %s...\n", addr)
+func dialKeyExchange(addr string) {
+	fmt.Printf("Dialing key exchange %s...\n", addr)
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		fmt.Println("Peer dial failed:", err)
 		return
 	}
 	defer conn.Close()
-	if err := WriteFrame(conn, make([]byte, 32), KeyExchange, 0); err != nil {
-		fmt.Println("Error writing ping:", err)
+	pubKey, privKey, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		log.Println("Error generating key:", err)
 		return
 	}
-	handleConnection(conn)
+	if err := WriteFrame(ConnState{conn: conn}, pubKey[:], KeyExchange, 0); err != nil {
+		fmt.Println("Error writing key exchange:", err)
+		return
+	}
+	msgType, flags, body, err := ReadFrame(ConnState{conn: conn})
+	if err != nil {
+		log.Println("Error reading frame:", err)
+		return
+	}
+	if msgType != KeyExchange {
+		log.Println("Unexpected message type:", msgType)
+		return
+	}
+	if flags&Encrypted != 0 {
+		log.Println("Received encrypted frame")
+	}
+	if flags&Fragmented != 0 {
+		log.Println("Received fragmented frame")
+	}
+	sharedKey := new([32]byte)
+	var theirPubKey [32]byte
+	copy(theirPubKey[:], body)
+	box.Precompute(sharedKey, &theirPubKey, privKey)
+	connState := ConnState{conn: conn, sharedKey: sharedKey}
+	log.Println("Key exchange complete")
+	handleConnection(connState)
+}
+
+func acceptKeyExchange(conn net.Conn) {
+	log.Printf("Accepting key exchange %s...", conn.RemoteAddr())
+	pubKey, privKey, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		log.Println("Error generating key:", err)
+		return
+	}
+	if err := WriteFrame(ConnState{conn: conn}, pubKey[:], KeyExchange, 0); err != nil {
+		fmt.Println("Error writing key exchange:", err)
+		return
+	}
+	msgType, flags, body, err := ReadFrame(ConnState{conn: conn})
+	if err != nil {
+		log.Println("Error reading frame:", err)
+		return
+	}
+	if msgType != KeyExchange {
+		log.Println("Unexpected message type:", msgType)
+		return
+	}
+	if flags&Encrypted != 0 {
+		log.Println("Received encrypted frame")
+	}
+	if flags&Fragmented != 0 {
+		log.Println("Received fragmented frame")
+	}
+	sharedKey := new([32]byte)
+	var theirPubKey [32]byte
+	copy(theirPubKey[:], body)
+	box.Precompute(sharedKey, &theirPubKey, privKey)
+	connState := ConnState{conn: conn, sharedKey: sharedKey}
+	log.Println("Key exchange complete")
+	handleConnection(connState)
 }
 
 type MessageType byte
@@ -173,30 +224,51 @@ const (
 	Fragmented Flags = 0x02
 ) // other bits are reserved
 
+type ConnState struct {
+	conn      net.Conn
+	sharedKey *[32]byte // nullable shared key
+}
+
 // Current Frame [4B payload_length][2B version][1B type][1B flags]
 
 // improtant writting a protocol
 
-const maxWriteMessageSize = 64 * 1024 // 64 KB
+const maxWriteMessageSize = 16 * 1024 // 16 KB
 
-func WriteFrame(conn net.Conn, data []byte, msgType MessageType, flags Flags) error {
+func WriteFrame(connState ConnState, data []byte, msgType MessageType, flags Flags) error {
 	if len(data) > maxWriteMessageSize {
 		return fmt.Errorf("message too large: %d > %d", len(data), maxWriteMessageSize)
 	}
 
 	header := make([]byte, 8)
-	binary.LittleEndian.PutUint32(header[0:4], uint32(len(data)))
+	if connState.sharedKey != nil {
+		// 24 bytes for nonce, 16 bytes for auth tag
+		binary.LittleEndian.PutUint32(header[0:4], uint32(len(data)+16))
+	} else {
+		binary.LittleEndian.PutUint32(header[0:4], uint32(len(data)))
+	}
+	// version (0x0100 = v1.0)
 	binary.LittleEndian.PutUint16(header[4:6], 0x0100)
 	header[6] = byte(msgType)
-	header[7] = byte(flags)
-	if _, err := conn.Write(header); err != nil {
+	if connState.sharedKey != nil {
+		header[7] = byte(flags | Encrypted)
+	} else {
+		header[7] = byte(flags)
+	}
+	if _, err := connState.conn.Write(header); err != nil {
 		return fmt.Errorf("write header: %w", err)
 	}
-	// nonce := make([]byte, 24)
-	// if _, err := rand.Read(nonce); err != nil {
-	// 	return fmt.Errorf("generate nonce: %w", err)
-	// }
-	if _, err := conn.Write(data); err != nil {
+	if connState.sharedKey != nil {
+		nonce := make([]byte, 24)
+		if _, err := rand.Read(nonce); err != nil {
+			return fmt.Errorf("generate nonce: %w", err)
+		}
+		if _, err := connState.conn.Write(nonce); err != nil {
+			return fmt.Errorf("write nonce: %w", err)
+		}
+		data = box.SealAfterPrecomputation(nil, data, (*[24]byte)(nonce), connState.sharedKey)
+	}
+	if _, err := connState.conn.Write(data); err != nil {
 		return fmt.Errorf("write body: %w", err)
 	}
 
@@ -204,27 +276,52 @@ func WriteFrame(conn net.Conn, data []byte, msgType MessageType, flags Flags) er
 	return nil
 }
 
-func ReadFrame(conn net.Conn) (MessageType, Flags, []byte, error) {
+func ReadFrame(connState ConnState) (MessageType, Flags, []byte, error) {
 	header := make([]byte, 8)
-	if _, err := io.ReadFull(conn, header); err != nil {
+	if _, err := io.ReadFull(connState.conn, header); err != nil {
 		return 0, 0, nil, fmt.Errorf("read header: %w", err)
 	}
 	length := binary.LittleEndian.Uint32(header[0:4])
+	version := binary.LittleEndian.Uint16(header[4:6])
 	msgType := MessageType(header[6])
 	flags := Flags(header[7])
+	if version != 0x0100 {
+		WriteFrame(connState, []byte(fmt.Sprintf("Version mismatch: expected 0x0100, got 0x%04x", version)), VersionMismatch, 0)
+		return 0, 0, nil, fmt.Errorf("version mismatch: expected 0x0100, got 0x%x", version)
+	}
+
+	if flags&Encrypted != 0 && length < 16 {
+		return 0, 0, nil, fmt.Errorf("underflow: encrypted frame payload %d < 16 bytes", length)
+	}
 	body := make([]byte, length)
-	if _, err := io.ReadFull(conn, body); err != nil {
-		return 0, 0, nil, fmt.Errorf("read body: %w", err)
+	if connState.sharedKey != nil && flags&Encrypted != 0 {
+		nonce := make([]byte, 24)
+		if _, err := io.ReadFull(connState.conn, nonce); err != nil {
+			return 0, 0, nil, fmt.Errorf("read nonce: %w", err)
+		}
+		if _, err := io.ReadFull(connState.conn, body); err != nil {
+			return 0, 0, nil, fmt.Errorf("read body: %w", err)
+		}
+		var ok bool
+		body, ok = box.OpenAfterPrecomputation(nil, body, (*[24]byte)(nonce), connState.sharedKey)
+		if !ok {
+			return 0, 0, nil, fmt.Errorf("decryption failed")
+		}
+
+	} else {
+		if _, err := io.ReadFull(connState.conn, body); err != nil {
+			return 0, 0, nil, fmt.Errorf("read body: %w", err)
+		}
 	}
 
 	return msgType, flags, body, nil
 }
 
-func handleConnection(conn net.Conn) {
-	defer conn.Close()
+func handleConnection(connState ConnState) {
+	defer connState.conn.Close()
 
 	for {
-		msgType, flags, body, err := ReadFrame(conn)
+		msgType, flags, body, err := ReadFrame(connState)
 		if err != nil {
 			log.Printf("Error reading frame: %v", err)
 			return
@@ -235,7 +332,7 @@ func handleConnection(conn net.Conn) {
 		switch msgType {
 		case Ping:
 			log.Println("Received ping")
-			if err := WriteFrame(conn, nil, Pong, 0); err != nil {
+			if err := WriteFrame(connState, nil, Pong, Encrypted); err != nil {
 				log.Println("Error writing pong:", err)
 				return
 			}
@@ -251,8 +348,6 @@ func handleConnection(conn net.Conn) {
 			log.Println("Received file chunk:", string(body))
 		case VersionMismatch:
 			log.Println("Received version mismatch:", string(body))
-		case KeyExchange:
-			log.Println("Received key exchange:", string(body))
 		}
 		if flags&Fragmented != 0 {
 			log.Println("Received fragmented frame")
