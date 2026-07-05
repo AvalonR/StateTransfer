@@ -537,6 +537,10 @@ func handleConnection(connState ConnState) {
 				log.Println("Error: file chunk too small")
 				return
 			}
+			if len(body) > maxWriteMessageSize {
+				log.Println("Error: file chunk too large")
+				return
+			}
 			id := hex.EncodeToString(body[:16])
 			seq := binary.LittleEndian.Uint32(body[16:20])
 			transfersMu.Lock()
