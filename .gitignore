@@ -4,6 +4,7 @@
 *.dll
 *.so
 *.dylib
+/bin
 
 # Test binary, built with `go test -c`
 *.test
@@ -21,17 +22,8 @@ vendor/
 go.work
 go.work.sum
 
-# Creative content
-idea.md
-idea2.md
-plan.md
-ThoughtDrawing.png
-
 # env file
 .env
-
-# Session state
-SESSION.md
 
 # Editor/IDE
 .idea/

@@ -51,26 +51,22 @@ func main() {
 	excludeIP := flag.String("exclude-ip", "", "IP to exclude from local filter (for WSL testing)")
 	port := flag.Int("port", 9092, "Port to listen on for local testing")
 	peerAddr := flag.String("peer", "", "direct peer address to connect (ip:port)")
-	indentity := flag.Bool("identity", false, "Generate or load identity key")
-	daemon := flag.Bool("daemon", false, "Generate or load identity key")
+	identityPath := flag.String("identity", "", "Path to identity key file")
+	daemon := flag.Bool("daemon", false, "Start as a daemon")
+	trial := flag.Bool("trial", false, "Trial to see if it boots")
 	flag.Parse()
+
+	if *trial {
+		log.Println("Success")
+		return
+	}
 
 	if *daemon {
 		isDaemon = true
 		log.SetOutput(io.Discard)
 	}
 
-	if *indentity {
-		log.Println("Generating or loading identity key...")
-		priv, pu := loadOrGenerateIdentity()
-		if priv == nil || pu == nil {
-			log.Println("Error loading or generating identity key")
-			return
-		}
-		log.Println("Identity key loaded or generated:", hex.EncodeToString(priv[:]), hex.EncodeToString(pu[:]))
-		return
-	}
-	identityPubKey, identityPrivKey = loadOrGenerateIdentity()
+	identityPubKey, identityPrivKey = loadOrGenerateIdentity(identityPath)
 	if identityPubKey == nil || identityPrivKey == nil {
 		log.Println("Error loading or generating identity key")
 		return
@@ -558,13 +554,14 @@ func handleConnection(connState ConnState) {
 			transfer.written += int64(len(body[20:]))
 			if transfer.written >= transfer.meta.Size {
 				transfer.file.Close()
-				os.Rename(transfer.path, filepath.Join(os.TempDir(), transfer.meta.Name))
+				os.Rename(transfer.file.Name(), transfer.path)
 				transfersMu.Lock()
 				delete(transfers, id)
 				transfersMu.Unlock()
 				if isDaemon {
 					emitEvent("file_received", map[string]any{
 						"from": connState.peerID,
+						"path": transfer.path,
 						"meta": transfer.meta,
 					})
 				}
@@ -579,14 +576,18 @@ func handleConnection(connState ConnState) {
 	}
 }
 
-func loadOrGenerateIdentity() (priv *[32]byte, pub *[32]byte) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		log.Println("Error getting user config dir:", err)
-		return
+func loadOrGenerateIdentity(customPath *string) (priv *[32]byte, pub *[32]byte) {
+	path := ""
+	if customPath == nil || *customPath == "" {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			log.Println("Error getting user config dir:", err)
+			return
+		}
+		path = filepath.Join(configDir, "statetransfer", "identity")
+	} else {
+		path = *customPath
 	}
-	dir := filepath.Join(configDir, "statetransfer")
-	path := filepath.Join(dir, "identity")
 	data, err := os.ReadFile(path)
 	if err == nil {
 		if len(data) != 64 {
@@ -604,7 +605,7 @@ func loadOrGenerateIdentity() (priv *[32]byte, pub *[32]byte) {
 			log.Println("Error generating pub key:", err)
 			return
 		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			log.Println("Error creating config dir:", err)
 			return
 		}
