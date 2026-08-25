@@ -116,7 +116,7 @@ func handleSendText(callID uint64, messageArgs json.RawMessage) {
 		emitResponse(callID, false, map[string]any{"error": "peer not found"})
 		return
 	}
-	if err := WriteFrame(*peer.conn, []byte(args.Text), Text, Encrypted); err != nil {
+	if err := WriteFrame(peer.conn, []byte(args.Text), Text, Encrypted); err != nil {
 		emitResponse(callID, false, map[string]any{"error": err.Error()})
 		return
 	}
@@ -136,21 +136,26 @@ func handleSentLink(callID uint64, messageArgs json.RawMessage) {
 		emitResponse(callID, false, map[string]any{"error": "peer not found"})
 		return
 	}
-	if err := WriteFrame(*peer.conn, []byte(args.Link), Link, Encrypted); err != nil {
+	if err := WriteFrame(peer.conn, []byte(args.Link), Link, Encrypted); err != nil {
 		emitResponse(callID, false, map[string]any{"error": err.Error()})
 		return
 	}
 	emitResponse(callID, true, nil)
 }
 
+type peerInfo struct {
+	ID   string `json:"id"`
+	Addr string `json:"addr"`
+}
+
 func handleListPeers(callID uint64) {
 	peersMutex.Lock()
 	defer peersMutex.Unlock()
-	var Peers []string
-	for _, peer := range peers {
-		Peers = append(Peers, peer.id+"@"+peer.name)
+	var out []peerInfo
+	for id, p := range peers {
+		out = append(out, peerInfo{ID: id, Addr: p.name})
 	}
-	emitResponse(callID, true, map[string]any{"peers": Peers})
+	emitResponse(callID, true, map[string]any{"peers": out})
 }
 
 func handleSendFile(callID uint64, messageArgs json.RawMessage) {
@@ -219,7 +224,7 @@ func sendFileStream(connState *ConnState, callID uint64, path string) {
 		emitResponse(callID, false, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := WriteFrame(*connState, metaBody, FileMeta, Encrypted); err != nil {
+	if err := WriteFrame(connState, metaBody, FileMeta, Encrypted); err != nil {
 		emitResponse(callID, false, map[string]any{"error": err.Error()})
 		return
 	}
@@ -240,7 +245,7 @@ func sendFileStream(connState *ConnState, callID uint64, path string) {
 		binary.LittleEndian.PutUint32(buf[16:20], uint32(seq))
 
 		payload := buf[:20+n]
-		if err := WriteFrame(*connState, payload, FileChunk, Encrypted); err != nil {
+		if err := WriteFrame(connState, payload, FileChunk, Encrypted); err != nil {
 			emitResponse(callID, false, map[string]any{"error": err.Error()})
 			return
 		}

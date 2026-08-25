@@ -199,14 +199,14 @@ func dialKeyExchange(addr string) {
 		return
 	}
 	payload := append(pubKey[:], identityPubKey[:]...)
-	if err := WriteFrame(ConnState{conn: conn}, payload, KeyExchange, 0); err != nil {
+	if err := WriteFrame(&ConnState{conn: conn}, payload, KeyExchange, 0); err != nil {
 		log.Println("Error writing key exchange:", err)
 		if isDaemon {
 			emitEvent("error", map[string]any{"msg": "write key exchange failed: " + err.Error()})
 		}
 		return
 	}
-	msgType, flags, body, err := ReadFrame(ConnState{conn: conn})
+	msgType, flags, body, err := ReadFrame(&ConnState{conn: conn})
 	if err != nil {
 		log.Println("Error reading frame:", err)
 		if isDaemon {
@@ -239,7 +239,7 @@ func dialKeyExchange(addr string) {
 	connState := ConnState{conn: conn, sharedKey: sharedKey, identityPub: &theirIdentityPubKey, peerID: id}
 
 	peersMutex.Lock()
-	peers[id] = &PeerState{id, connState.identityPub, conn.RemoteAddr().String(), &connState}
+	peers[id] = &PeerState{id: id, pub: connState.identityPub, name: conn.RemoteAddr().String(), conn: &connState}
 	peersMutex.Unlock()
 	if isDaemon {
 		emitEvent("peer_connected", map[string]any{
@@ -248,7 +248,7 @@ func dialKeyExchange(addr string) {
 		})
 	}
 	log.Println("Key exchange complete, peer added to peer list: ", id)
-	handleConnection(connState)
+	handleConnection(&connState)
 }
 
 func acceptKeyExchange(conn net.Conn) {
@@ -262,14 +262,14 @@ func acceptKeyExchange(conn net.Conn) {
 		return
 	}
 	payload := append(pubKey[:], identityPubKey[:]...)
-	if err := WriteFrame(ConnState{conn: conn}, payload, KeyExchange, 0); err != nil {
+	if err := WriteFrame(&ConnState{conn: conn}, payload, KeyExchange, 0); err != nil {
 		log.Println("Error writing key exchange:", err)
 		if isDaemon {
 			emitEvent("error", map[string]any{"msg": "write key exchange failed: " + err.Error()})
 		}
 		return
 	}
-	msgType, flags, body, err := ReadFrame(ConnState{conn: conn})
+	msgType, flags, body, err := ReadFrame(&ConnState{conn: conn})
 	if err != nil {
 		log.Println("Error reading frame:", err)
 		if isDaemon {
@@ -302,7 +302,7 @@ func acceptKeyExchange(conn net.Conn) {
 	connState := ConnState{conn: conn, sharedKey: sharedKey, identityPub: &theirIdentityPubKey, peerID: id}
 
 	peersMutex.Lock()
-	peers[id] = &PeerState{id, connState.identityPub, conn.RemoteAddr().String(), &connState}
+	peers[id] = &PeerState{id: id, pub: connState.identityPub, name: conn.RemoteAddr().String(), conn: &connState}
 	peersMutex.Unlock()
 	if isDaemon {
 		emitEvent("peer_connected", map[string]any{
@@ -311,7 +311,7 @@ func acceptKeyExchange(conn net.Conn) {
 		})
 	}
 	log.Println("Key exchange complete, peer added to peer list: ", id)
-	handleConnection(connState)
+	handleConnection(&connState)
 }
 
 type MessageType byte
@@ -336,10 +336,11 @@ const (
 ) // other bits are reserved
 
 type ConnState struct {
-	conn        net.Conn
-	sharedKey   *[32]byte // nullable shared key
-	identityPub *[32]byte // peer's stable identity public key (not for encryption)
-	peerID      string
+	conn           net.Conn
+	sharedKey      *[32]byte // nullable shared key
+	identityPub    *[32]byte // peer's stable identity public key (not for encryption)
+	peerID         string
+	connWriteMutex sync.Mutex
 }
 
 type PeerState struct {
@@ -355,7 +356,9 @@ type PeerState struct {
 
 const maxWriteMessageSize = 256 * 1024 // 256 KB
 
-func WriteFrame(connState ConnState, data []byte, msgType MessageType, flags Flags) error {
+func WriteFrame(connState *ConnState, data []byte, msgType MessageType, flags Flags) error {
+	connState.connWriteMutex.Lock()
+	defer connState.connWriteMutex.Unlock()
 	if len(data) > maxWriteMessageSize {
 		return fmt.Errorf("message too large: %d > %d", len(data), maxWriteMessageSize)
 	}
@@ -396,7 +399,7 @@ func WriteFrame(connState ConnState, data []byte, msgType MessageType, flags Fla
 	return nil
 }
 
-func ReadFrame(connState ConnState) (MessageType, Flags, []byte, error) {
+func ReadFrame(connState *ConnState) (MessageType, Flags, []byte, error) {
 	header := make([]byte, 8)
 	if _, err := io.ReadFull(connState.conn, header); err != nil {
 		return 0, 0, nil, fmt.Errorf("read header: %w", err)
@@ -440,7 +443,7 @@ func ReadFrame(connState ConnState) (MessageType, Flags, []byte, error) {
 	return msgType, flags, body, nil
 }
 
-func handleConnection(connState ConnState) {
+func handleConnection(connState *ConnState) {
 	defer func() {
 		connState.conn.Close()
 		if isDaemon {
@@ -505,7 +508,15 @@ func handleConnection(connState ConnState) {
 				log.Println("Error unmarshaling file meta:", err)
 				return
 			}
-			file, err := os.CreateTemp("", "st-*")
+			appTempDir := filepath.Join(os.TempDir(), "statetransfer")
+			if err := os.MkdirAll(appTempDir, 0o700); err != nil {
+				log.Println("Error creating temp directory")
+			}
+
+			safeName := filepath.Base(fileMetaData.Name)
+			finalPath := filepath.Join(appTempDir, safeName)
+
+			file, err := os.CreateTemp(appTempDir, "st-*")
 			if err != nil {
 				log.Println("Error creating temp file:", err)
 				return
@@ -515,7 +526,7 @@ func handleConnection(connState ConnState) {
 				peerID:  connState.identityPub,
 				meta:    &fileMetaData,
 				file:    file,
-				path:    filepath.Join(os.TempDir(), fileMetaData.Name),
+				path:    finalPath,
 				written: 0,
 			}
 			transfersMu.Unlock()
@@ -554,7 +565,10 @@ func handleConnection(connState ConnState) {
 			transfer.written += int64(len(body[20:]))
 			if transfer.written >= transfer.meta.Size {
 				transfer.file.Close()
-				os.Rename(transfer.file.Name(), transfer.path)
+				err := os.Rename(transfer.file.Name(), transfer.path)
+				if err != nil {
+					emitEvent("error", map[string]any{"msg": "error saving the file"})
+				}
 				transfersMu.Lock()
 				delete(transfers, id)
 				transfersMu.Unlock()

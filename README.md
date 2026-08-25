@@ -4,19 +4,6 @@ Cross-platform, zero-knowledge state transfer between your own devices: push tex
 
 **Status:** Go daemon networking engine is done; the Tauri desktop shell (Rust bridge + Svelte frontend) is the active work item.
 
-## Documentation
-
-Documentation is consolidated under `docs/` (ordered for easy reading):
-
-| Doc | Contents |
-|---|---|
-| [docs/01-overview.md](docs/01-overview.md) | What it is, components, tech stack, architecture |
-| [docs/02-protocol.md](docs/02-protocol.md) | Wire protocol v1.0 as implemented (frames, types, crypto, key exchange) |
-| [docs/03-daemon-ipc.md](docs/03-daemon-ipc.md) | Daemon CLI flags, stdin/stdout IPC commands and events |
-| [docs/04-tauri-backend.md](docs/04-tauri-backend.md) | Tauri ⇄ daemon bridge design + current implementation plan |
-| [docs/05-roadmap.md](docs/05-roadmap.md) | Phased roadmap (A–D), done vs planned, long-term vision |
-| [docs/06-testing.md](docs/06-testing.md) | Build/run/test guide and known gotchas |
-
 ## Quick start
 
 ```bash

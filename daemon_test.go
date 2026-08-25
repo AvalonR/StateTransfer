@@ -105,14 +105,14 @@ func connectPeer(addr string) (*ConnState, func(), error) {
 	}
 
 	payload := append(pubKey[:], identityPubKey[:]...)
-	if err := WriteFrame(ConnState{conn: conn}, payload, KeyExchange, 0); err != nil {
+	if err := WriteFrame(&ConnState{conn: conn}, payload, KeyExchange, 0); err != nil {
 		log.Println("Error writing key exchange:", err)
 		if isDaemon {
 			emitEvent("error", map[string]any{"msg": "write key exchange failed: " + err.Error()})
 		}
 		return nil, nil, err
 	}
-	msgType, flags, body, err := ReadFrame(ConnState{conn: conn})
+	msgType, flags, body, err := ReadFrame(&ConnState{conn: conn})
 	if err != nil {
 		log.Println("Error reading frame:", err)
 		if isDaemon {
@@ -225,7 +225,7 @@ func TestDaemonSendText(t *testing.T) {
 	t.Log("IPC response: ok=true")
 
 	t.Log("=== Reading encrypted frame from TCP ===")
-	msgType, _, body, err := ReadFrame(*connState)
+	msgType, _, body, err := ReadFrame(connState)
 	if err != nil {
 		t.Fatalf("ReadFrame error: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestDaemonReceiveText(t *testing.T) {
 	t.Logf("Daemon assigned us peer ID: %s", peerID)
 
 	t.Log("=== Sending Text frame over TCP ===")
-	if err := WriteFrame(*connState, []byte("Hello back"), Text, Encrypted); err != nil {
+	if err := WriteFrame(connState, []byte("Hello back"), Text, Encrypted); err != nil {
 		t.Fatal(err)
 	}
 	t.Log("Text frame sent via TCP")
@@ -317,7 +317,7 @@ func TestDaemonReceiveFile(t *testing.T) {
 	metaBody, _ := json.Marshal(meta)
 	t.Logf("Sending FileMeta — ID: %s, Name: %s, Size: %d", transferID, meta.Name, meta.Size)
 
-	if err := WriteFrame(*connState, metaBody, FileMeta, Encrypted); err != nil {
+	if err := WriteFrame(connState, metaBody, FileMeta, Encrypted); err != nil {
 		t.Fatal(err)
 	}
 
@@ -334,7 +334,7 @@ func TestDaemonReceiveFile(t *testing.T) {
 	copy(chunk[20:], content)
 
 	t.Log("Sending FileChunk frame")
-	if err := WriteFrame(*connState, chunk, FileChunk, Encrypted); err != nil {
+	if err := WriteFrame(connState, chunk, FileChunk, Encrypted); err != nil {
 		t.Fatal(err)
 	}
 
