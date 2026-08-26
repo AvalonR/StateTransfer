@@ -45,6 +45,13 @@ var (
 	transfers   = make(map[string]*activeTransfer) // keyed by transfer ID (hex, 32 chars)
 )
 
+type daemonInfo struct {
+	Addr           string `json:"addr"`
+	IdentityPubKey string `json:"id"`
+}
+
+var dI daemonInfo
+
 var isDaemon bool
 
 func main() {
@@ -53,6 +60,7 @@ func main() {
 	peerAddr := flag.String("peer", "", "direct peer address to connect (ip:port)")
 	identityPath := flag.String("identity", "", "Path to identity key file")
 	daemon := flag.Bool("daemon", false, "Start as a daemon")
+	// savePath := flag.String("savePath", "", "Path where to save files received")
 	trial := flag.Bool("trial", false, "Trial to see if it boots")
 	flag.Parse()
 
@@ -71,6 +79,7 @@ func main() {
 		log.Println("Error loading or generating identity key")
 		return
 	}
+	dI.IdentityPubKey = hex.EncodeToString(identityPubKey[:8])
 
 	host, err := os.Hostname()
 	if err != nil {
@@ -88,6 +97,7 @@ func main() {
 		log.Println(err)
 		panic(err)
 	}
+	dI.Addr = listener.Addr().String()
 	defer listener.Close()
 
 	go func() {
@@ -210,14 +220,14 @@ func dialKeyExchange(addr string) {
 	if err != nil {
 		log.Println("Error reading frame:", err)
 		if isDaemon {
-			emitEvent("error", map[string]any{"error": err.Error()})
+			emitEvent("error", map[string]any{"msg": err.Error()})
 		}
 		return
 	}
 	if msgType != KeyExchange {
 		log.Println("Unexpected message type:", msgType)
 		if isDaemon {
-			emitEvent("error", map[string]any{"error": "unexpected message type(" + string(msgType) + ")"})
+			emitEvent("error", map[string]any{"msg": "unexpected message type(" + string(msgType) + ")"})
 		}
 		return
 	}
@@ -378,21 +388,35 @@ func WriteFrame(connState *ConnState, data []byte, msgType MessageType, flags Fl
 	} else {
 		header[7] = byte(flags)
 	}
-	if _, err := connState.conn.Write(header); err != nil {
-		return fmt.Errorf("write header: %w", err)
+	finalWriteBuffer := make([]byte, 0)
+	finalWriteBuffer, err := binary.Append(finalWriteBuffer, binary.LittleEndian, header)
+	if err != nil {
+		return fmt.Errorf("appending header: %w", err)
 	}
+
+	connState.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	if connState.sharedKey != nil {
 		nonce := make([]byte, 24)
 		if _, err := rand.Read(nonce); err != nil {
 			return fmt.Errorf("generate nonce: %w", err)
 		}
-		if _, err := connState.conn.Write(nonce); err != nil {
-			return fmt.Errorf("write nonce: %w", err)
+		finalWriteBuffer, err = binary.Append(finalWriteBuffer, binary.LittleEndian, nonce)
+		if err != nil {
+			return fmt.Errorf("appending nonce: %w", err)
 		}
 		data = box.SealAfterPrecomputation(nil, data, (*[24]byte)(nonce), connState.sharedKey)
 	}
-	if _, err := connState.conn.Write(data); err != nil {
-		return fmt.Errorf("write body: %w", err)
+	finalWriteBuffer, err = binary.Append(finalWriteBuffer, binary.LittleEndian, data)
+	if err != nil {
+		return fmt.Errorf("appending data: %w", err)
+	}
+	_, err = connState.conn.Write(finalWriteBuffer)
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		connState.conn.Close()
+		return fmt.Errorf("connection closed due to timeout after 30s, details: %w", err)
+	} else if err != nil {
+		connState.conn.Close()
+		return fmt.Errorf("write failed due to: %w", err)
 	}
 
 	log.Println("Wrote frame (MessageType, Flags, Length(Data)): ", msgType, flags, len(data))
@@ -412,7 +436,7 @@ func ReadFrame(connState *ConnState) (MessageType, Flags, []byte, error) {
 	msgType := MessageType(header[6])
 	flags := Flags(header[7])
 	if version != 0x0100 {
-		WriteFrame(connState, []byte(fmt.Sprintf("Version mismatch: expected 0x0100, got 0x%04x", version)), VersionMismatch, 0)
+		WriteFrame(connState, fmt.Appendf(nil, "Version mismatch: expected 0x0100, got 0x%04x", version), VersionMismatch, 0)
 		return 0, 0, nil, fmt.Errorf("version mismatch: expected 0x0100, got 0x%x", version)
 	}
 
@@ -455,6 +479,7 @@ func handleConnection(connState *ConnState) {
 			})
 		}
 		transfersMu.Lock()
+		defer transfersMu.Unlock()
 		for _, transfer := range transfers {
 			if *transfer.peerID == *connState.identityPub {
 				if transfer.file != nil {

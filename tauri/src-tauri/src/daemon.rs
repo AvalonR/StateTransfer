@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering::SeqCst;
 
-use crate::{AppState, ClipboardItem, ItemType, Notification, Peer};
-use chrono::{DateTime, FixedOffset, Local};
+use crate::{emit_peer_list, AppState, ClipboardItem, ItemType, Notification, Peer};
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tauri_plugin_shell::{
@@ -26,43 +26,34 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
                     Ok(response) => {
                         println!("Response was {:?}", &response);
                         if let Some(peers) = &response.peers {
-                            println!("The peers are {peers:?}");
                             let missing = peers.iter().filter(|dp| {
                                 !app_handle
                                     .state::<AppState>()
                                     .peer_stack
                                     .lock()
-                                    .unwrap()
+                                    .unwrap_or_else(|e| e.into_inner())
                                     .iter()
                                     .any(|pp| pp.id == dp.id)
                             });
                             if missing.clone().count() > 0 {
                                 for dp in missing {
-                                    app_handle
-                                        .state::<AppState>()
-                                        .peer_stack
-                                        .lock()
-                                        .unwrap()
-                                        .push(Peer {
-                                            id: dp.id.clone(),
-                                            address: dp.addr.clone(),
-                                            active: true,
-                                            name: "".to_string(),
-                                        })
+                                    app_handle.state::<AppState>().add_peer(Peer {
+                                        id: dp.id.clone(),
+                                        address: dp.addr.clone(),
+                                        active: true,
+                                        name: "".to_string(),
+                                    })
                                 }
-                                match app_handle.emit(
-                                    "updated_list_of_peers",
-                                    app_handle
-                                        .state::<AppState>()
-                                        .peer_stack
-                                        .lock()
-                                        .unwrap()
-                                        .clone(),
-                                ) {
-                                    Ok(_) => println!("Emitted list of peers event"),
-                                    Err(e) => println!("Couldn't emit list of peers event {e}"),
-                                };
+                                emit_peer_list(&app_handle);
                             }
+                        }
+                        if let Some(daemon_info) = &response.daemon_info {
+                            app_handle
+                                .state::<AppState>()
+                                .daemon_info
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone_from(daemon_info);
                         }
                     }
                     Err(_) => match serde_json::from_slice::<IpcEvent>(&line) {
@@ -75,7 +66,7 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
                                             .state::<AppState>()
                                             .peer_stack
                                             .lock()
-                                            .unwrap()
+                                            .unwrap_or_else(|e| e.into_inner())
                                             .iter_mut()
                                             .find(|p| p.id == *id)
                                         {
@@ -87,40 +78,22 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
                                         }
                                     };
                                     if peer_exists {
-                                        app_handle
-                                            .state::<AppState>()
-                                            .notification_stack
-                                            .lock()
-                                            .unwrap()
-                                            .push(Notification {
-                                                text: "Peer Reconnected".to_string(),
-                                                r#type: crate::NotificationType::Normal,
-                                                timestamp: Local::now(),
-                                            });
+                                        app_handle.state::<AppState>().add_notification(
+                                            Notification::new(
+                                                "Peer Reconnected",
+                                                crate::NotificationType::Normal,
+                                            ),
+                                        );
                                         app_handle
                                             .emit(
                                                 "new_notification",
-                                                Notification {
-                                                    text: "Peer Reconnected".to_string(),
-                                                    r#type: crate::NotificationType::Normal,
-                                                    timestamp: Local::now(),
-                                                },
+                                                Notification::new(
+                                                    "Peer Reconnected",
+                                                    crate::NotificationType::Normal,
+                                                ),
                                             )
                                             .unwrap();
-                                        match app_handle.emit(
-                                            "updated_list_of_peers",
-                                            app_handle
-                                                .state::<AppState>()
-                                                .peer_stack
-                                                .lock()
-                                                .unwrap()
-                                                .clone(),
-                                        ) {
-                                            Ok(_) => println!("Emitted list of peers event"),
-                                            Err(e) => {
-                                                println!("Couldn't emit list of peers event {e}")
-                                            }
-                                        };
+                                        emit_peer_list(&app_handle);
                                     } else {
                                         println!("Peer was not in the stack");
                                         let peer = Peer {
@@ -129,33 +102,23 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
                                             name: "".to_string(),
                                             active: true,
                                         };
-                                        app_handle
-                                            .state::<AppState>()
-                                            .peer_stack
-                                            .lock()
-                                            .unwrap()
-                                            .push(peer.clone());
+                                        app_handle.state::<AppState>().add_peer(peer.clone());
                                         match app_handle.emit("added_to_list_of_peers", peer) {
                                             Ok(_) => {
                                                 println!("Emitted addition to list of peers event");
-                                                app_handle
-                                                    .state::<AppState>()
-                                                    .notification_stack
-                                                    .lock()
-                                                    .unwrap()
-                                                    .push(Notification {
-                                                        text: "New Peer Connected".to_string(),
-                                                        r#type: crate::NotificationType::Normal,
-                                                        timestamp: Local::now(),
-                                                    });
+                                                app_handle.state::<AppState>().add_notification(
+                                                    Notification::new(
+                                                        "New Peer Connected",
+                                                        crate::NotificationType::Normal,
+                                                    ),
+                                                );
                                                 app_handle
                                                     .emit(
                                                         "new_notification",
-                                                        Notification {
-                                                            text: "New Peer Connected".to_string(),
-                                                            r#type: crate::NotificationType::Normal,
-                                                            timestamp: Local::now(),
-                                                        },
+                                                        Notification::new(
+                                                            "New Peer Connected",
+                                                            crate::NotificationType::Normal,
+                                                        ),
                                                     )
                                                     .unwrap();
                                             }
@@ -163,25 +126,16 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
                                                 println!(
                                                 "Couldn't emit addition to list of peers event {e}"
                                             );
-                                                app_handle
-                                                .state::<AppState>()
-                                                .notification_stack
-                                                .lock()
-                                                .unwrap()
-                                                .push(Notification {
-                                                    text: "Error emiting addition to list of peers"
-                                                        .to_string(),
-                                                    r#type: crate::NotificationType::Error,
-                                                    timestamp: Local::now(),
-                                                });
+                                                app_handle.state::<AppState>().add_notification(
+                                                    Notification::new(
+                                                        "Error emiting addition to list of peers",
+                                                        crate::NotificationType::Error,
+                                                    ),
+                                                );
                                                 app_handle
                                                 .emit(
                                                     "new_notification",
-                                                    Notification {
-                                                        text: "Error emiting addition to list of peers".to_string(),
-                                                        r#type: crate::NotificationType::Normal,
-                                                        timestamp: Local::now(),
-                                                    },
+                                                    Notification::new("Error emiting addition to list of peers", crate::NotificationType::Normal)
                                                 )
                                                 .unwrap();
                                             }
@@ -193,59 +147,40 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
                                         .state::<AppState>()
                                         .peer_stack
                                         .lock()
-                                        .unwrap()
+                                        .unwrap_or_else(|e| e.into_inner())
                                         .iter_mut()
                                         .find(|peer_in_state| peer_in_state.id == *peer)
                                     {
                                         Some(peer) => peer.active = false,
                                         None => println!("Peer was not in the stack"),
                                     };
-                                    match app_handle.emit(
-                                        "updated_list_of_peers",
-                                        app_handle
-                                            .state::<AppState>()
-                                            .peer_stack
-                                            .lock()
-                                            .unwrap()
-                                            .clone(),
-                                    ) {
-                                        Ok(_) => println!("Emitted list of peers event"),
-                                        Err(e) => println!("Couldn't emit list of peers event {e}"),
-                                    };
+                                    emit_peer_list(&app_handle);
                                     println!("Peer disconnected {peer}");
-                                    app_handle
-                                        .state::<AppState>()
-                                        .notification_stack
-                                        .lock()
-                                        .unwrap()
-                                        .push(Notification {
-                                            text: "Peer Disconnected".to_string(),
-                                            r#type: crate::NotificationType::Normal,
-                                            timestamp: Local::now(),
-                                        });
+                                    app_handle.state::<AppState>().add_notification(
+                                        Notification::new(
+                                            "Peer Disconnected",
+                                            crate::NotificationType::Normal,
+                                        ),
+                                    );
                                     app_handle
                                         .emit(
                                             "new_notification",
-                                            Notification {
-                                                text: "Peer Disconnected".to_string(),
-                                                r#type: crate::NotificationType::Normal,
-                                                timestamp: Local::now(),
-                                            },
+                                            Notification::new(
+                                                "Peer Disconnected",
+                                                crate::NotificationType::Normal,
+                                            ),
                                         )
                                         .unwrap();
                                 }
                                 IpcEventTypes::TextReceived { from, text } => {
                                     println!("Added new text entry to clipboard stack");
-                                    app_handle
-                                        .state::<AppState>()
-                                        .clipboard_stack
-                                        .lock()
-                                        .unwrap()
-                                        .push(ClipboardItem {
+                                    app_handle.state::<AppState>().add_clipboard_item(
+                                        ClipboardItem {
                                             value: text.clone(),
                                             item_type: ItemType::Text,
                                             from: from.clone(),
-                                        });
+                                        },
+                                    );
                                     match app_handle.emit(
                                         "added_to_clipboard_stack",
                                         ClipboardItem {
@@ -264,16 +199,13 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
                                 }
                                 IpcEventTypes::LinkReceived { from, link } => {
                                     println!("Added new link entry to clipboard stack");
-                                    app_handle
-                                        .state::<AppState>()
-                                        .clipboard_stack
-                                        .lock()
-                                        .unwrap()
-                                        .push(ClipboardItem {
+                                    app_handle.state::<AppState>().add_clipboard_item(
+                                        ClipboardItem {
                                             value: link.clone(),
                                             item_type: ItemType::Url,
                                             from: from.clone(),
-                                        });
+                                        },
+                                    );
                                     match app_handle.emit(
                                         "added_to_clipboard_stack",
                                         ClipboardItem {
@@ -299,16 +231,13 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
                                 IpcEventTypes::FileReceived { from, path, meta } => {
                                     println!("FileReceived {:?}, {:?}, {:?}", from, path, meta);
                                     println!("Added new path entry to clipboard stack");
-                                    app_handle
-                                        .state::<AppState>()
-                                        .clipboard_stack
-                                        .lock()
-                                        .unwrap()
-                                        .push(ClipboardItem {
+                                    app_handle.state::<AppState>().add_clipboard_item(
+                                        ClipboardItem {
                                             value: path.clone(),
                                             item_type: ItemType::FilePath,
                                             from: from.clone(),
-                                        });
+                                        },
+                                    );
                                     match app_handle.emit(
                                         "added_to_clipboard_stack",
                                         ClipboardItem {
@@ -352,6 +281,7 @@ pub async fn spawn_daemon(app_handle: &tauri::AppHandle) -> CommandChild {
 #[serde(tag = "cmd", content = "args", rename_all = "snake_case")]
 enum CommandPayload {
     ListPeers,
+    DaemonInfo,
     SendText { target: String, text: String },
     SendLink { target: String, link: String },
     SendFile { target: String, path: String },
@@ -371,6 +301,12 @@ struct DaemonPeer {
     addr: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DaemonInfo {
+    pub addr: String,
+    pub id: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct IpcResponse {
     id: u64,
@@ -379,6 +315,8 @@ struct IpcResponse {
     error: Option<String>,
     #[serde(default)]
     peers: Option<Vec<DaemonPeer>>,
+    #[serde(default)]
+    daemon_info: Option<DaemonInfo>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -556,6 +494,29 @@ pub async fn list_peers(state: tauri::State<'_, AppState>) -> Result<(), String>
     let request: IpcRequest = IpcRequest {
         id: state.next_request_id.fetch_add(1, SeqCst),
         payload: CommandPayload::ListPeers,
+    };
+    let mut json = serde_json::to_string(&request).unwrap();
+    json.push('\n');
+    if let Some(child) = daemon.as_mut() {
+        return match child.write(json.as_bytes()) {
+            Ok(_) => {
+                println!("List Peers write was successful");
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to write to daemon {e}")),
+        };
+    } else {
+        Err("Daemon process is not running".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn daemon_info(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut daemon = state.daemon_process.lock().unwrap();
+    // build out a request
+    let request: IpcRequest = IpcRequest {
+        id: state.next_request_id.fetch_add(1, SeqCst),
+        payload: CommandPayload::DaemonInfo,
     };
     let mut json = serde_json::to_string(&request).unwrap();
     json.push('\n');

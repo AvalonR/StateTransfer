@@ -18,6 +18,7 @@
     GlobeX,
     Type,
     SquarePen,
+    UserKey,
   } from "@lucide/svelte";
   import CustomSelect from "../lib/CustomSelect.svelte";
 
@@ -25,7 +26,19 @@
     get_clipboard_stack();
     get_list_peers();
     get_notification_stack();
+    get_daemon_info();
   });
+
+  type DaemonInfo = {
+    addr: string;
+    id: string;
+  };
+
+  let daemonInfo: DaemonInfo = $state({ addr: "", id: "" });
+
+  async function get_daemon_info() {
+    daemonInfo = await invoke("get_daemon_info");
+  }
 
   type Notification = {
     text: string;
@@ -197,6 +210,8 @@
         break;
     }
   }
+
+  let showDaemonInfo: boolean = $state(false);
 </script>
 
 <main class="container">
@@ -268,6 +283,18 @@
             {:else}
               No notifications
             {/each}
+          </div>
+        {/if}
+      </div>
+
+      <div class="popover-wrapper">
+        <button onclick={() => (showDaemonInfo = !showDaemonInfo)}>
+          <UserKey size={24} />
+        </button>
+        {#if showDaemonInfo}
+          <div id="daemon-info-pop-up">
+            ID: {daemonInfo.id}
+            Address: {daemonInfo.addr}
           </div>
         {/if}
       </div>
@@ -437,6 +464,22 @@
   }
 
   #notification-pop-up {
+    margin: 0;
+    padding: 4px;
+    min-width: 200px;
+    max-height: calc(5 * 1.5em + 2rem);
+    overflow-y: auto;
+
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    left: auto;
+    border-radius: 12px;
+    border: 2px solid var(--color-accent);
+    background-color: var(--color-background-muted);
+  }
+
+  #daemon-info-pop-up {
     margin: 0;
     padding: 4px;
     min-width: 200px;

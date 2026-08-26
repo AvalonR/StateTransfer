@@ -93,6 +93,8 @@ func stdinReader() {
 			go connectToPeer(env.ID, env.Args)
 		case "list_peers":
 			go handleListPeers(env.ID)
+		case "daemon_info":
+			go handleDaemonInfo(env.ID)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -102,6 +104,10 @@ func stdinReader() {
 }
 
 // Handlers for stdin commands
+
+func handleDaemonInfo(callID uint64) {
+	emitResponse(callID, true, map[string]any{"daemon_info": dI})
+}
 
 func handleSendText(callID uint64, messageArgs json.RawMessage) {
 	var args sendTextArgs
@@ -219,6 +225,9 @@ func sendFileStream(connState *ConnState, callID uint64, path string) {
 		Total:   (int(stat.Size()) + (maxWriteMessageSize - 20) - 1) / (maxWriteMessageSize - 20),
 		ModTime: stat.ModTime(),
 	}
+	if meta.Total <= 0 {
+		emitResponse(callID, false, map[string]any{"error": "Empty or corrupted file size"})
+	}
 	metaBody, err := json.Marshal(meta)
 	if err != nil {
 		emitResponse(callID, false, map[string]any{"error": err.Error()})
@@ -228,6 +237,7 @@ func sendFileStream(connState *ConnState, callID uint64, path string) {
 		emitResponse(callID, false, map[string]any{"error": err.Error()})
 		return
 	}
+	emitResponse(callID, true, nil)
 	idRaw, err := hex.DecodeString(meta.ID)
 	if err != nil {
 		emitResponse(callID, false, map[string]any{"error": err.Error()})
@@ -236,10 +246,13 @@ func sendFileStream(connState *ConnState, callID uint64, path string) {
 	buf := make([]byte, maxWriteMessageSize)
 	lastPct := -1
 	for seq := 0; seq < meta.Total; seq++ {
-		n, err := file.Read(buf[20:])
-		if err != nil && err != io.EOF {
+		n, err := io.ReadFull(file, buf[20:])
+		if err != nil && err != io.ErrUnexpectedEOF {
 			emitResponse(callID, false, map[string]any{"error": err.Error()})
 			return
+		}
+		if n == 0 {
+			break
 		}
 		copy(buf[:16], idRaw)
 		binary.LittleEndian.PutUint32(buf[16:20], uint32(seq))
@@ -259,4 +272,11 @@ func sendFileStream(connState *ConnState, callID uint64, path string) {
 			})
 		}
 	}
+	emitEvent("file_sent", map[string]any{
+		"id":      meta.ID,
+		"name":    meta.Name,
+		"size":    meta.Size,
+		"total":   meta.Total,
+		"modtime": meta.ModTime,
+	})
 }
